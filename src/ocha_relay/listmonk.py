@@ -1,6 +1,6 @@
 """Listmonk campaign client.
 
-Listmonk API reference: https://listmonk.app/docs/apis/campaigns/
+Listmonk API reference: https://listmonk.app/docs/apis/apis/
 """
 
 from __future__ import annotations

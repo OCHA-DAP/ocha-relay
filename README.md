@@ -45,3 +45,8 @@ uv run ruff check .      # lint
 uv run ruff format .     # format
 uv run mypy src          # type check
 ```
+
+## References
+
+- Listmonk API docs: https://listmonk.app/docs/apis/apis/ — consult before adding new
+  endpoint wrappers; payload shapes and status semantics belong to upstream.

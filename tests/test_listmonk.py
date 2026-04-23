@@ -5,7 +5,12 @@ from typing import Any
 import pytest
 import requests
 
-from ocha_relay.listmonk import ListmonkClient, Subscriber
+from ocha_relay.listmonk import (
+    ListmonkClient,
+    SendAborted,
+    SendSummary,
+    Subscriber,
+)
 
 
 def _client() -> ListmonkClient:
@@ -302,10 +307,15 @@ def test_create_campaign_uses_default_template_id(
 # ---------- send_campaign ----------
 
 
-def test_send_campaign_puts_running_to_status_endpoint(
+def test_send_campaign_skip_confirmation_puts_running_to_status_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """skip_confirmation=True path: one status-check GET, then the PUT."""
     captured: dict[str, Any] = {}
+
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        assert url.endswith("/campaigns/42")
+        return _FakeResponse({"data": {"id": 42, "status": "draft"}})
 
     def fake_put(url: str, **kwargs: Any) -> _FakeResponse:
         captured["url"] = url
@@ -313,9 +323,10 @@ def test_send_campaign_puts_running_to_status_endpoint(
         captured["auth"] = kwargs["auth"]
         return _FakeResponse({"data": {}})
 
+    monkeypatch.setattr(requests, "get", fake_get)
     monkeypatch.setattr(requests, "put", fake_put)
 
-    result = _client().send_campaign(42)
+    result = _client().send_campaign(42, skip_confirmation=True)
 
     assert result is None
     assert captured["url"] == (
@@ -330,10 +341,160 @@ def test_send_campaign_puts_running_to_status_endpoint(
 def test_send_campaign_raises_on_http_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse({"data": {"id": 42, "status": "draft"}})
+
     def fake_put(url: str, **kwargs: Any) -> _FakeResponse:
         return _FakeResponse({"data": {}}, status_code=500)
 
+    monkeypatch.setattr(requests, "get", fake_get)
     monkeypatch.setattr(requests, "put", fake_put)
 
     with pytest.raises(requests.HTTPError):
-        _client().send_campaign(42)
+        _client().send_campaign(42, skip_confirmation=True)
+
+
+# ---------- build_send_summary + confirmation flow ----------
+
+
+def _fake_campaign(
+    campaign_id: int = 42,
+    name: str = "Weekly Update",
+    status: str = "draft",
+    lists: list[dict[str, Any]] | None = None,
+    subject: str = "Subj",
+    from_email: str = "from@x.org",
+) -> dict[str, Any]:
+    return {
+        "data": {
+            "id": campaign_id,
+            "name": name,
+            "subject": subject,
+            "status": status,
+            "from_email": from_email,
+            "lists": lists if lists is not None else [{"id": 1, "name": "L1"}],
+        }
+    }
+
+
+def test_build_send_summary_assembles_campaign_and_recipients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        if url.endswith("/campaigns/42"):
+            return _FakeResponse(
+                _fake_campaign(
+                    lists=[{"id": 1, "name": "L1"}, {"id": 2, "name": "L2"}]
+                )
+            )
+        if url.endswith("/subscribers"):
+            return _FakeResponse(_page([_sub(9, "a@x.org")], 1, 1, 100))
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    summary = _client().build_send_summary(42)
+
+    assert isinstance(summary, SendSummary)
+    assert summary.campaign_id == 42
+    assert summary.name == "Weekly Update"
+    assert summary.subject == "Subj"
+    assert summary.status == "draft"
+    assert summary.from_email == "from@x.org"
+    assert summary.target_lists == [(1, "L1"), (2, "L2")]
+    assert [r.email for r in summary.recipients] == ["a@x.org"]
+
+
+def test_send_campaign_prompts_and_sends_when_name_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    put_fired: dict[str, Any] = {}
+
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        if url.endswith("/campaigns/42"):
+            return _FakeResponse(_fake_campaign())
+        if url.endswith("/subscribers"):
+            return _FakeResponse(_page([], 0, 1, 100))
+        raise AssertionError(f"unexpected url: {url}")
+
+    def fake_put(url: str, **kwargs: Any) -> _FakeResponse:
+        put_fired["url"] = url
+        put_fired["json"] = kwargs["json"]
+        return _FakeResponse({"data": {}})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests, "put", fake_put)
+
+    received_prompt: dict[str, Any] = {}
+
+    def ask(prompt: str) -> str:
+        received_prompt["text"] = prompt
+        return "Weekly Update"  # matches fake_campaign default
+
+    _client().send_campaign(42, ask=ask)
+
+    assert put_fired["json"] == {"status": "running"}
+    # Summary text should have been passed to ask, not just a short prompt.
+    assert "Weekly Update" in received_prompt["text"]
+    assert "Send Summary" in received_prompt["text"]
+
+
+def test_send_campaign_raises_when_typed_name_does_not_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        if url.endswith("/campaigns/42"):
+            return _FakeResponse(_fake_campaign())
+        if url.endswith("/subscribers"):
+            return _FakeResponse(_page([], 0, 1, 100))
+        raise AssertionError(f"unexpected url: {url}")
+
+    def fake_put(url: str, **kwargs: Any) -> _FakeResponse:
+        raise AssertionError("PUT must not fire when confirmation fails")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests, "put", fake_put)
+
+    with pytest.raises(SendAborted, match="Confirmation mismatch"):
+        _client().send_campaign(42, ask=lambda _p: "wrong name")
+
+
+def test_send_campaign_refuses_finished_status_in_interactive_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        if url.endswith("/campaigns/42"):
+            return _FakeResponse(_fake_campaign(status="finished"))
+        if url.endswith("/subscribers"):
+            return _FakeResponse(_page([], 0, 1, 100))
+        raise AssertionError(f"unexpected url: {url}")
+
+    def fake_put(url: str, **kwargs: Any) -> _FakeResponse:
+        raise AssertionError("PUT must not fire against a finished campaign")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests, "put", fake_put)
+
+    # ask is never called because status check happens first; use a
+    # sentinel that would fail loudly if it ever were.
+    def ask(_p: str) -> str:
+        raise AssertionError("ask must not be called for finished campaigns")
+
+    with pytest.raises(SendAborted, match="finished"):
+        _client().send_campaign(42, ask=ask)
+
+
+def test_send_campaign_refuses_finished_status_even_with_skip_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse({"data": {"id": 42, "status": "finished"}})
+
+    def fake_put(url: str, **kwargs: Any) -> _FakeResponse:
+        raise AssertionError("PUT must not fire against a finished campaign")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests, "put", fake_put)
+
+    with pytest.raises(SendAborted, match="finished"):
+        _client().send_campaign(42, skip_confirmation=True)

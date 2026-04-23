@@ -6,6 +6,7 @@ Listmonk API reference: https://listmonk.app/docs/apis/apis/
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Self
 
@@ -13,6 +14,15 @@ import requests
 
 DEFAULT_CAMPAIGN_TEMPLATE_ID = 8
 _SUBSCRIBERS_PAGE_SIZE = 100
+
+
+class SendAborted(Exception):
+    """Raised when ``send_campaign`` refuses to send or fails confirmation.
+
+    Includes: typed-name mismatch, campaign status == ``"finished"``
+    (refused even with ``skip_confirmation=True`` — re-sending would
+    duplicate emails to recipients).
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +64,26 @@ class Subscriber:
                 status = lst.get("subscription_status")
                 return status if isinstance(status, str) else None
         return None
+
+
+@dataclass(frozen=True, slots=True)
+class SendSummary:
+    """The 'what is about to happen' snapshot for a pending send.
+
+    Pure data. Produced by :meth:`ListmonkClient.build_send_summary` and
+    consumed by :meth:`ListmonkClient.send_campaign` to render the
+    confirmation prompt, but useful on its own for notebook inspection,
+    logging, or wiring into a custom confirmation UI (Slack, web form).
+    """
+
+    campaign_id: int
+    name: str
+    subject: str
+    status: str
+    from_email: str | None
+    target_lists: list[tuple[int, str]]
+    recipients: list[Subscriber]
+    raw_campaign: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,8 +153,54 @@ class ListmonkClient:
         campaign_id: int = r.json()["data"]["id"]
         return campaign_id
 
-    def send_campaign(self, campaign_id: int) -> None:
-        """Transition a draft campaign to ``running`` so Listmonk sends it."""
+    def send_campaign(
+        self,
+        campaign_id: int,
+        *,
+        skip_confirmation: bool = False,
+        ask: Callable[[str], str] = input,
+    ) -> None:
+        """Transition a campaign to ``running`` (this is what actually sends).
+
+        Default (``skip_confirmation=False``): build a :class:`SendSummary`,
+        render it as a prompt string, call ``ask(prompt)`` to collect the
+        caller's typed response, and only send if the response matches the
+        campaign name exactly. Suitable for notebook / REPL use. In a
+        headless environment (no stdin), the default ``ask=input`` will
+        raise ``EOFError`` — which is the intended behaviour: no silent
+        sends without human confirmation.
+
+        ``skip_confirmation=True``: skip the prompt entirely. Use for
+        automation (scheduled jobs, CI). The campaign still cannot be
+        sent if its status is ``"finished"`` — that would duplicate
+        emails to recipients and is hard-refused regardless of mode.
+
+        ``ask`` is the confirmation callable. Defaults to ``input``. Pass
+        a custom callable for tests, Slack-based confirmation, or other
+        interactive UIs — it receives the full summary text as its
+        single argument and must return the caller's response string.
+        """
+        if skip_confirmation:
+            campaign = self.get_campaign(campaign_id)
+            if campaign.get("status") == "finished":
+                raise SendAborted(
+                    f"Campaign {campaign_id} has status 'finished'; "
+                    f"refusing to re-send (would duplicate emails)."
+                )
+        else:
+            summary = self.build_send_summary(campaign_id)
+            if summary.status == "finished":
+                raise SendAborted(
+                    f"Campaign {campaign_id} has status 'finished'; "
+                    f"refusing to re-send (would duplicate emails)."
+                )
+            answer = ask(_format_summary_for_confirmation(summary))
+            if answer.strip() != summary.name:
+                raise SendAborted(
+                    f"Confirmation mismatch: got {answer.strip()!r}, "
+                    f"expected {summary.name!r}. Send aborted."
+                )
+
         r = requests.put(
             f"{self.base_url}/campaigns/{campaign_id}/status",
             auth=self._auth,
@@ -132,6 +208,34 @@ class ListmonkClient:
             timeout=self.timeout,
         )
         r.raise_for_status()
+
+    def build_send_summary(self, campaign_id: int) -> SendSummary:
+        """Assemble the 'what is about to happen' snapshot for a campaign.
+
+        Fetches the campaign and its resolved recipients (deduped across
+        target lists, no subscription-status filter applied). Returns a
+        :class:`SendSummary` — pure data, no printing or prompting.
+        """
+        campaign = self.get_campaign(campaign_id)
+        lists_raw = campaign.get("lists", [])
+        target_lists: list[tuple[int, str]] = [
+            (int(lst["id"]), str(lst.get("name", "")))
+            for lst in lists_raw
+            if "id" in lst
+        ]
+        list_ids = [lid for lid, _ in target_lists]
+        recipients = self.list_subscribers(list_ids) if list_ids else []
+        from_email = campaign.get("from_email")
+        return SendSummary(
+            campaign_id=campaign_id,
+            name=str(campaign.get("name", "")),
+            subject=str(campaign.get("subject", "")),
+            status=str(campaign.get("status", "")),
+            from_email=from_email if isinstance(from_email, str) else None,
+            target_lists=target_lists,
+            recipients=recipients,
+            raw_campaign=campaign,
+        )
 
     def get_campaign(self, campaign_id: int) -> dict[str, Any]:
         """Fetch a campaign record. Returns the ``data`` dict from the API."""
@@ -179,9 +283,7 @@ class ListmonkClient:
             )
             r.raise_for_status()
             data = r.json()["data"]
-            subscribers.extend(
-                Subscriber.from_api(row) for row in data["results"]
-            )
+            subscribers.extend(Subscriber.from_api(row) for row in data["results"])
             if page * data["per_page"] >= data["total"]:
                 break
             page += 1
@@ -222,7 +324,44 @@ class ListmonkClient:
 def _require_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        raise RuntimeError(
-            f"Environment variable {name} is required but not set."
-        )
+        raise RuntimeError(f"Environment variable {name} is required but not set.")
     return value
+
+
+_CONFIRM_SAMPLE_LIMIT = 5
+
+
+def _format_summary_for_confirmation(summary: SendSummary) -> str:
+    lines = [
+        f"Send Summary — Campaign {summary.campaign_id}",
+        f"  Name:    {summary.name!r}",
+        f"  Subject: {summary.subject!r}",
+        f"  Status:  {summary.status!r}",
+    ]
+    if summary.from_email:
+        lines.append(f"  From:    {summary.from_email!r}")
+    lines.append("  Target Lists:")
+    for lid, lname in summary.target_lists:
+        lines.append(f"    - [{lid}] {lname}")
+    lines.append(f"  Recipients: {len(summary.recipients)}")
+    for r in summary.recipients[:_CONFIRM_SAMPLE_LIMIT]:
+        lines.append(
+            f"    - {r.email}  subscriber_status={r.status!r}  name={r.name!r}"
+        )
+    remaining = len(summary.recipients) - _CONFIRM_SAMPLE_LIMIT
+    if remaining > 0:
+        lines.append(f"    ... and {remaining} more (not shown)")
+
+    if summary.status != "draft":
+        lines.append("")
+        lines.append(
+            f"  WARNING: status is {summary.status!r}, not 'draft'. "
+            f"Proceed only if intentional."
+        )
+
+    lines.append("")
+    lines.append("About to trigger Listmonk to send this campaign.")
+    lines.append("This action cannot be undone.")
+    lines.append("")
+    lines.append("Type the campaign name EXACTLY to confirm (anything else aborts): ")
+    return "\n".join(lines)

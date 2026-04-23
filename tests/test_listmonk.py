@@ -226,3 +226,114 @@ def test_campaign_recipients_returns_empty_when_campaign_has_no_lists(
     monkeypatch.setattr(requests, "get", fake_get)
 
     assert _client().campaign_recipients(99) == []
+
+
+# ---------- create_campaign ----------
+
+
+def test_create_campaign_posts_to_campaigns_and_returns_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["url"] = url
+        captured["json"] = kwargs["json"]
+        captured["auth"] = kwargs["auth"]
+        return _FakeResponse({"data": {"id": 99}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    result = _client().create_campaign(
+        name="w2-update",
+        subject="Weekly update",
+        body="<p>hello</p>",
+        list_ids=[3, 4],
+    )
+
+    assert result == 99
+    assert captured["url"] == "https://listmonk.example.org/api/campaigns"
+    assert captured["auth"] == ("u", "p")
+    payload = captured["json"]
+    assert payload["name"] == "w2-update"
+    assert payload["subject"] == "Weekly update"
+    assert payload["body"] == "<p>hello</p>"
+    assert payload["lists"] == [3, 4]
+    # These two are design invariants we do NOT want accidentally changed:
+    # "regular" is what distinguishes this from "optin"/"transactional".
+    assert payload["type"] == "regular"
+    assert payload["content_type"] == "html"
+
+
+def test_create_campaign_defaults_empty_lists_when_none_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["json"] = kwargs["json"]
+        return _FakeResponse({"data": {"id": 1}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    _client().create_campaign(name="n", subject="s", body="b")
+
+    assert captured["json"]["lists"] == []
+
+
+def test_create_campaign_uses_default_template_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ocha_relay.listmonk import DEFAULT_CAMPAIGN_TEMPLATE_ID
+
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["json"] = kwargs["json"]
+        return _FakeResponse({"data": {"id": 1}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    _client().create_campaign(name="n", subject="s", body="b")
+
+    assert captured["json"]["template_id"] == DEFAULT_CAMPAIGN_TEMPLATE_ID
+
+
+# ---------- send_campaign ----------
+
+
+def test_send_campaign_puts_running_to_status_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_put(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["url"] = url
+        captured["json"] = kwargs["json"]
+        captured["auth"] = kwargs["auth"]
+        return _FakeResponse({"data": {}})
+
+    monkeypatch.setattr(requests, "put", fake_put)
+
+    result = _client().send_campaign(42)
+
+    assert result is None
+    assert captured["url"] == (
+        "https://listmonk.example.org/api/campaigns/42/status"
+    )
+    # Exact payload is the critical assertion — this is the single API
+    # call that tells Listmonk to start sending.
+    assert captured["json"] == {"status": "running"}
+    assert captured["auth"] == ("u", "p")
+
+
+def test_send_campaign_raises_on_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_put(url: str, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse({"data": {}}, status_code=500)
+
+    monkeypatch.setattr(requests, "put", fake_put)
+
+    with pytest.raises(requests.HTTPError):
+        _client().send_campaign(42)

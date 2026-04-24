@@ -8,15 +8,42 @@ Early-stage package. **Listmonk** (campaigns, subscribers, rendered-HTML preview
 
 ## Install
 
+For local development of this package:
+
 ```bash
 uv sync
 ```
 
-For editable use from another uv-managed project:
+### Installing as a dependency in another project
+
+Until this package is published on PyPI, install directly from Git in any uv-managed project:
 
 ```bash
+# Pin to a release tag (recommended — immutable ref):
+uv add "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@v0.1.0"
+
+# Pin to main (moves with the default branch):
+uv add "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@main"
+
+# Or for local editable use during development:
 uv add --editable path/to/ocha-relay
 ```
+
+This lands in the consumer's `pyproject.toml` as:
+
+```toml
+dependencies = [
+    "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@v0.1.0",
+]
+```
+
+Consumers then import as:
+
+```python
+from ocha_relay.listmonk import ListmonkClient
+```
+
+Once the package stabilizes and the SMTP/Jinja module lands, publishing to PyPI will enable the frictionless `uv add ocha-relay`.
 
 ## Environment variables
 

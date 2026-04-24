@@ -101,7 +101,6 @@ def test_list_subscribers_single_page(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [s.email for s in result] == ["a@x.org", "b@x.org"]
     assert all(isinstance(s, Subscriber) for s in result)
     assert captured["url"] == "https://listmonk.example.org/api/subscribers"
-    # list_id param repeated; page + per_page present
     assert ("list_id", 5) in captured["params"]
     assert ("page", 1) in captured["params"]
     assert ("per_page", 100) in captured["params"]
@@ -549,8 +548,6 @@ def test_preview_in_browser_writes_html_and_opens_default_browser(
 ) -> None:
     """Fetches rendered HTML, writes it to a temp file, invokes webbrowser.open
     with that file's URI, and returns the Path."""
-    import webbrowser
-
     from ocha_relay import listmonk as mod
 
     def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
@@ -564,9 +561,6 @@ def test_preview_in_browser_writes_html_and_opens_default_browser(
 
     monkeypatch.setattr(requests, "get", fake_get)
     monkeypatch.setattr(mod.webbrowser, "open", fake_open)
-    # Belt & braces: also patch the imported-here alias in case of module
-    # identity drift (same underlying module, separate test visibility).
-    monkeypatch.setattr(webbrowser, "open", fake_open)
 
     path = _client().preview_in_browser(42)
 

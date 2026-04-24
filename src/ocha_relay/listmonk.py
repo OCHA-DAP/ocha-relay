@@ -185,18 +185,10 @@ class ListmonkClient:
         """
         if skip_confirmation:
             campaign = self.get_campaign(campaign_id)
-            if campaign.get("status") == "finished":
-                raise SendAborted(
-                    f"Campaign {campaign_id} has status 'finished'; "
-                    f"refusing to re-send (would duplicate emails)."
-                )
+            _refuse_if_finished(campaign_id, campaign.get("status", ""))
         else:
             summary = self.build_send_summary(campaign_id)
-            if summary.status == "finished":
-                raise SendAborted(
-                    f"Campaign {campaign_id} has status 'finished'; "
-                    f"refusing to re-send (would duplicate emails)."
-                )
+            _refuse_if_finished(campaign_id, summary.status)
             answer = ask(_format_summary_for_confirmation(summary))
             if answer.strip() != summary.name:
                 raise SendAborted(
@@ -220,21 +212,19 @@ class ListmonkClient:
         :class:`SendSummary` — pure data, no printing or prompting.
         """
         campaign = self.get_campaign(campaign_id)
-        lists_raw = campaign.get("lists", [])
         target_lists: list[tuple[int, str]] = [
-            (int(lst["id"]), str(lst.get("name", "")))
-            for lst in lists_raw
+            (int(lst["id"]), lst.get("name", ""))
+            for lst in campaign.get("lists", [])
             if "id" in lst
         ]
         list_ids = [lid for lid, _ in target_lists]
         recipients = self.list_subscribers(list_ids) if list_ids else []
-        from_email = campaign.get("from_email")
         return SendSummary(
             campaign_id=campaign_id,
-            name=str(campaign.get("name", "")),
-            subject=str(campaign.get("subject", "")),
-            status=str(campaign.get("status", "")),
-            from_email=from_email if isinstance(from_email, str) else None,
+            name=campaign.get("name", ""),
+            subject=campaign.get("subject", ""),
+            status=campaign.get("status", ""),
+            from_email=campaign.get("from_email"),
             target_lists=target_lists,
             recipients=recipients,
             raw_campaign=campaign,
@@ -356,7 +346,7 @@ class ListmonkClient:
         and the actual send will cause drift.
         """
         campaign = self.get_campaign(campaign_id)
-        list_ids = [lst["id"] for lst in campaign.get("lists", [])]
+        list_ids = _extract_list_ids(campaign)
         if not list_ids:
             return []
         return self.list_subscribers(
@@ -370,6 +360,18 @@ def _require_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Environment variable {name} is required but not set.")
     return value
+
+
+def _refuse_if_finished(campaign_id: int, status: str) -> None:
+    if status == "finished":
+        raise SendAborted(
+            f"Campaign {campaign_id} has status 'finished'; "
+            f"refusing to re-send (would duplicate emails)."
+        )
+
+
+def _extract_list_ids(campaign: dict[str, Any]) -> list[int]:
+    return [int(lst["id"]) for lst in campaign.get("lists", []) if "id" in lst]
 
 
 _CONFIRM_SAMPLE_LIMIT = 5

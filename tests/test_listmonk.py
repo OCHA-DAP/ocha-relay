@@ -24,11 +24,19 @@ def _client() -> ListmonkClient:
 class _FakeResponse:
     """Minimal stand-in for ``requests.Response`` — enough for our code."""
 
-    def __init__(self, json_body: dict[str, Any], status_code: int = 200) -> None:
+    def __init__(
+        self,
+        json_body: dict[str, Any] | None = None,
+        status_code: int = 200,
+        text: str = "",
+    ) -> None:
         self._json = json_body
         self.status_code = status_code
+        self.text = text
 
     def json(self) -> dict[str, Any]:
+        if self._json is None:
+            raise ValueError("no json body set on fake response")
         return self._json
 
     def raise_for_status(self) -> None:
@@ -498,3 +506,76 @@ def test_send_campaign_refuses_finished_status_even_with_skip_confirmation(
 
     with pytest.raises(SendAborted, match="finished"):
         _client().send_campaign(42, skip_confirmation=True)
+
+
+# ---------- get_rendered_html + preview_in_browser ----------
+
+
+def test_get_rendered_html_returns_response_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["url"] = url
+        captured["auth"] = kwargs["auth"]
+        return _FakeResponse(text="<html><body>rendered</body></html>")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    html = _client().get_rendered_html(42)
+
+    assert html == "<html><body>rendered</body></html>"
+    assert captured["url"] == (
+        "https://listmonk.example.org/api/campaigns/42/preview"
+    )
+    assert captured["auth"] == ("u", "p")
+
+
+def test_get_rendered_html_raises_on_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse(status_code=500, text="server error")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    with pytest.raises(requests.HTTPError):
+        _client().get_rendered_html(42)
+
+
+def test_preview_in_browser_writes_html_and_opens_default_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fetches rendered HTML, writes it to a temp file, invokes webbrowser.open
+    with that file's URI, and returns the Path."""
+    import webbrowser
+
+    from ocha_relay import listmonk as mod
+
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse(text="<html>preview body</html>")
+
+    opened_with: dict[str, str] = {}
+
+    def fake_open(url: str, *_args: Any, **_kwargs: Any) -> bool:
+        opened_with["url"] = url
+        return True
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(mod.webbrowser, "open", fake_open)
+    # Belt & braces: also patch the imported-here alias in case of module
+    # identity drift (same underlying module, separate test visibility).
+    monkeypatch.setattr(webbrowser, "open", fake_open)
+
+    path = _client().preview_in_browser(42)
+
+    assert path.exists(), "temp file should persist after call"
+    assert path.suffix == ".html"
+    assert path.read_text(encoding="utf-8") == "<html>preview body</html>"
+    assert opened_with["url"] == path.as_uri()
+    assert opened_with["url"].startswith("file://")
+
+    # Test-side cleanup — library deliberately leaves the temp file so
+    # the browser has time to load it.
+    path.unlink()

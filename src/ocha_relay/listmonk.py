@@ -6,8 +6,11 @@ Listmonk API reference: https://listmonk.app/docs/apis/apis/
 from __future__ import annotations
 
 import os
+import tempfile
+import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Self
 
 import requests
@@ -247,6 +250,47 @@ class ListmonkClient:
         r.raise_for_status()
         data: dict[str, Any] = r.json()["data"]
         return data
+
+    def get_rendered_html(self, campaign_id: int) -> str:
+        """Fetch the server-rendered HTML of a campaign.
+
+        Hits ``GET /api/campaigns/{id}/preview`` and returns the HTML
+        string Listmonk produces by wrapping the campaign's body in its
+        template. This is what a recipient's email client would display.
+
+        Different from ``get_campaign(id)["body"]``, which returns the
+        raw body you stored — without the template applied.
+        """
+        r = requests.get(
+            f"{self.base_url}/campaigns/{campaign_id}/preview",
+            auth=self._auth,
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        return r.text
+
+    def preview_in_browser(self, campaign_id: int) -> Path:
+        """Fetch the rendered HTML and open it in the default browser.
+
+        Writes the HTML to a named temp file, invokes
+        :func:`webbrowser.open`, and returns the path. The temp file is
+        NOT auto-deleted — the browser process may still be loading when
+        this call returns — so the OS's temp-directory cleanup handles
+        it eventually. Callers who want to remove it immediately can
+        ``path.unlink()`` on the returned :class:`~pathlib.Path`.
+        """
+        html = self.get_rendered_html(campaign_id)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".html",
+            prefix=f"ocha_relay_preview_{campaign_id}_",
+            delete=False,
+            encoding="utf-8",
+        ) as tmp:
+            tmp.write(html)
+        path = Path(tmp.name)
+        webbrowser.open(path.as_uri())
+        return path
 
     def list_subscribers(
         self,

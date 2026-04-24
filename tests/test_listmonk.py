@@ -311,6 +311,18 @@ def test_create_campaign_uses_default_template_id(
     assert captured["json"]["template_id"] == DEFAULT_CAMPAIGN_TEMPLATE_ID
 
 
+def test_create_campaign_raises_on_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse({"data": {}}, status_code=500)
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    with pytest.raises(requests.HTTPError):
+        _client().create_campaign(name="n", subject="s", body="b")
+
+
 # ---------- send_campaign ----------
 
 

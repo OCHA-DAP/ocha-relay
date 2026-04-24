@@ -136,6 +136,12 @@ class ListmonkClient:
 
         The campaign is NOT sent — call ``send_campaign(id)`` to trigger
         delivery.
+
+        ``template_id`` defaults to ``DEFAULT_CAMPAIGN_TEMPLATE_ID`` (``8``),
+        which is the template id used on OCHA's Listmonk instance. If you
+        are pointing this client at a different Listmonk, pass the
+        ``template_id`` of that instance's campaign template — using ``8``
+        blindly will either 400 or wrap your body in the wrong template.
         """
         payload: dict[str, Any] = {
             "name": name,
@@ -318,6 +324,11 @@ class ListmonkClient:
             r.raise_for_status()
             data = r.json()["data"]
             subscribers.extend(Subscriber.from_api(row) for row in data["results"])
+            # Defensive: a malformed per_page=0 response would wedge the
+            # pagination check (0 * anything is never >= total). Bail
+            # rather than loop forever.
+            if data["per_page"] == 0:
+                break
             if page * data["per_page"] >= data["total"]:
                 break
             page += 1

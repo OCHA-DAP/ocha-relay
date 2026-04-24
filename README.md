@@ -32,10 +32,13 @@ uv add --editable path/to/ocha-relay
 This lands in the consumer's `pyproject.toml` as:
 
 ```toml
-dependencies = [
-    "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@v0.1.0",
-]
+dependencies = ["ocha-relay"]
+
+[tool.uv.sources]
+ocha-relay = { git = "https://github.com/OCHA-DAP/ocha-relay.git", rev = "v0.1.0" }
 ```
+
+(Older uv versions inlined the Git URL directly into `dependencies` using the `"ocha-relay @ git+https://..."` form. Either shape installs the same package; current uv writes the `[tool.uv.sources]` layout above.)
 
 Consumers then import as:
 
@@ -98,12 +101,12 @@ client.send_campaign(cid)
 **Read (GET endpoints, no side effects)**
 - `get_campaign(campaign_id) -> dict` — raw campaign record
 - `list_subscribers(list_ids, subscription_status=None) -> list[Subscriber]` — across one or more lists, deduped server-side; `list_ids` is required (no "everyone in the instance" mode)
-- `campaign_recipients(campaign_id) -> list[Subscriber]` — convenience: reads the campaign's target lists and resolves their subscribers
+- `campaign_recipients(campaign_id, subscription_status=None) -> list[Subscriber]` — convenience: reads the campaign's target lists and resolves their subscribers. Pass `subscription_status="confirmed"` (or other valid value) to filter; `None` means "everyone on the lists."
 - `get_rendered_html(campaign_id) -> str` — Listmonk's server-rendered HTML (template applied) — what a recipient sees in their inbox
 - `build_send_summary(campaign_id) -> SendSummary` — structured pre-send snapshot (name, subject, status, target lists, recipients) for custom review/display
 
 **Write / action**
-- `create_campaign(*, name, subject, body, list_ids=None, template_id=8, content_type="html") -> int` — POSTs a new draft, returns new campaign id
+- `create_campaign(*, name, subject, body, list_ids=None, template_id=8, content_type="html") -> int` — POSTs a new draft, returns new campaign id. `template_id=8` is the OCHA Listmonk's canonical campaign template; override if you're pointing at a different Listmonk instance.
 - `send_campaign(campaign_id, *, skip_confirmation=False, ask=input) -> None` — transitions campaign to `running` (the actual email-triggering call). Default prompts for confirmation; refuses status `"finished"` in both modes (re-sending would duplicate emails).
 - `preview_in_browser(campaign_id) -> Path` — fetches rendered HTML, writes to a temp file, calls `webbrowser.open` on it
 

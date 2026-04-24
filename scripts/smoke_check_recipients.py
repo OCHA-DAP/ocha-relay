@@ -1,14 +1,15 @@
-"""Manual smoke test against real Listmonk. NOT part of the test suite.
+"""Manual smoke test: inspect who would receive an email.
 
-Read-only — only calls GET endpoints. Never sends an email.
+Read-only — only calls GET endpoints. Never sends an email, never
+writes to Listmonk state.
 
 Prints minimally (count + a few samples) to avoid dumping hundreds of
 real email addresses into your terminal scrollback.
 
 Usage (requires DSCI_LISTMONK_* env vars set)::
 
-    uv run python scripts/smoke_listmonk.py subscribers <list_id>
-    uv run python scripts/smoke_listmonk.py campaign <campaign_id>
+    uv run python scripts/smoke_check_recipients.py subscribers <list_id>
+    uv run python scripts/smoke_check_recipients.py campaign <campaign_id>
 """
 
 from __future__ import annotations
@@ -62,8 +63,8 @@ def main() -> None:
     if len(args) != 2 or args[0] not in {"subscribers", "campaign"}:
         sys.exit(
             "usage:\n"
-            "  smoke_listmonk.py subscribers <list_id>\n"
-            "  smoke_listmonk.py campaign <campaign_id>"
+            "  smoke_check_recipients.py subscribers <list_id>\n"
+            "  smoke_check_recipients.py campaign <campaign_id>"
         )
 
     subcommand, raw_id = args

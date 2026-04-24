@@ -6,7 +6,7 @@ so no email is triggered. Clean up the draft from the admin UI
 afterward.
 
 If you are looking for a read-only smoke test (subscribers, campaign
-inspection), use scripts/smoke_listmonk.py instead.
+inspection), use scripts/smoke_check_recipients.py instead.
 
 Usage (requires DSCI_LISTMONK_* env vars set)::
 

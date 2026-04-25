@@ -103,7 +103,7 @@ client.send_campaign(cid)
 - `list_subscribers(list_ids, subscription_status=None) -> list[Subscriber]` — across one or more lists, deduped server-side; `list_ids` is required (no "everyone in the instance" mode)
 - `campaign_recipients(campaign_id, subscription_status=None) -> list[Subscriber]` — convenience: reads the campaign's target lists and resolves their subscribers. Pass `subscription_status="confirmed"` (or other valid value) to filter; `None` means "everyone on the lists."
 - `get_rendered_html(campaign_id) -> str` — Listmonk's server-rendered HTML (template applied) — what a recipient sees in their inbox
-- `build_send_summary(campaign_id) -> SendSummary` — structured pre-send snapshot (name, subject, status, target lists, recipients) for custom review/display
+- `build_send_manifest(campaign_id) -> SendManifest` — structured pre-send snapshot (name, subject, status, target lists, recipients) for custom review/display. Call `manifest.format()` for a printable multi-line string.
 
 **Write / action**
 - `create_campaign(*, name, subject, body, list_ids=None, template_id=8, content_type="html") -> int` — POSTs a new draft, returns new campaign id. `template_id=8` is the OCHA Listmonk's canonical campaign template; override if you're pointing at a different Listmonk instance.
@@ -113,7 +113,7 @@ client.send_campaign(cid)
 ### Data types
 
 - **`Subscriber`** — flattened subscriber record. Fields: `id`, `email`, `name`, `status` (*subscriber-level*: `enabled`/`disabled`/`blocklisted`), `raw` (full API payload). Method: `subscription_status_for(list_id) -> str | None` returns the *per-list* status (`confirmed`/`unconfirmed`/`unsubscribed`), which differs from `.status`.
-- **`SendSummary`** — the "what is about to happen" data object. Fields include `name`, `subject`, `status`, `target_lists: list[tuple[int, str]]`, `recipients: list[Subscriber]`.
+- **`SendManifest`** — the pre-send manifest data object. Fields include `name`, `subject`, `status`, `target_lists: list[tuple[int, str]]`, `recipients: list[Subscriber]`. Method `.format() -> str` returns a printable multi-line snapshot (use it for inspect / log / Slack contexts; the dataclass `repr` is preserved for grep-friendly logging).
 
 ### Exceptions
 

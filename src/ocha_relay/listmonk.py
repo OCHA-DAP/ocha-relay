@@ -70,13 +70,18 @@ class Subscriber:
 
 
 @dataclass(frozen=True, slots=True)
-class SendSummary:
-    """The 'what is about to happen' snapshot for a pending send.
+class SendManifest:
+    """The pre-send manifest for a campaign: who, what, where.
 
-    Pure data. Produced by :meth:`ListmonkClient.build_send_summary` and
+    Pure data. Produced by :meth:`ListmonkClient.build_send_manifest` and
     consumed by :meth:`ListmonkClient.send_campaign` to render the
     confirmation prompt, but useful on its own for notebook inspection,
     logging, or wiring into a custom confirmation UI (Slack, web form).
+
+    Call :meth:`format` to get a printable multi-line snapshot string
+    (campaign id, name, subject, status, target lists, recipients sample,
+    plus a warning if status is not ``"draft"``). The dataclass ``repr``
+    is preserved for grep-friendly logging.
     """
 
     campaign_id: int
@@ -87,6 +92,43 @@ class SendSummary:
     target_lists: list[tuple[int, str]]
     recipients: list[Subscriber]
     raw_campaign: dict[str, Any]
+
+    def format(self) -> str:
+        """Return a human-readable multi-line snapshot of this manifest.
+
+        Includes a status warning if the campaign is not in ``"draft"``
+        state. Does NOT include any confirmation-prompt text — that lives
+        in :func:`_format_send_confirmation_prompt` and is appended only
+        when :meth:`ListmonkClient.send_campaign` is asking for input.
+        """
+        lines = [
+            f"Send Manifest — Campaign {self.campaign_id}",
+            f"  Name:    {self.name!r}",
+            f"  Subject: {self.subject!r}",
+            f"  Status:  {self.status!r}",
+        ]
+        if self.from_email:
+            lines.append(f"  From:    {self.from_email!r}")
+        lines.append("  Target Lists:")
+        for lid, lname in self.target_lists:
+            lines.append(f"    - [{lid}] {lname}")
+        lines.append(f"  Recipients: {len(self.recipients)}")
+        for r in self.recipients[:_CONFIRM_SAMPLE_LIMIT]:
+            lines.append(
+                f"    - {r.email}  subscriber_status={r.status!r}  name={r.name!r}"
+            )
+        remaining = len(self.recipients) - _CONFIRM_SAMPLE_LIMIT
+        if remaining > 0:
+            lines.append(f"    ... and {remaining} more (not shown)")
+
+        if self.status != "draft":
+            lines.append("")
+            lines.append(
+                f"  WARNING: status is {self.status!r}, not 'draft'. "
+                f"Proceed only if intentional."
+            )
+
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +213,7 @@ class ListmonkClient:
     ) -> None:
         """Transition a campaign to ``running`` (this is what actually sends).
 
-        Default (``skip_confirmation=False``): build a :class:`SendSummary`,
+        Default (``skip_confirmation=False``): build a :class:`SendManifest`,
         render it as a prompt string, call ``ask(prompt)`` to collect the
         caller's typed response, and only send if the response matches the
         campaign name exactly. Suitable for notebook / REPL use. In a
@@ -193,13 +235,13 @@ class ListmonkClient:
             campaign = self.get_campaign(campaign_id)
             _refuse_if_finished(campaign_id, campaign.get("status", ""))
         else:
-            summary = self.build_send_summary(campaign_id)
-            _refuse_if_finished(campaign_id, summary.status)
-            answer = ask(_format_summary_for_confirmation(summary))
-            if answer.strip() != summary.name:
+            manifest = self.build_send_manifest(campaign_id)
+            _refuse_if_finished(campaign_id, manifest.status)
+            answer = ask(_format_send_confirmation_prompt(manifest))
+            if answer.strip() != manifest.name:
                 raise SendAborted(
                     f"Confirmation mismatch: got {answer.strip()!r}, "
-                    f"expected {summary.name!r}. Send aborted."
+                    f"expected {manifest.name!r}. Send aborted."
                 )
 
         r = requests.put(
@@ -210,12 +252,13 @@ class ListmonkClient:
         )
         r.raise_for_status()
 
-    def build_send_summary(self, campaign_id: int) -> SendSummary:
-        """Assemble the 'what is about to happen' snapshot for a campaign.
+    def build_send_manifest(self, campaign_id: int) -> SendManifest:
+        """Assemble the pre-send manifest for a campaign.
 
         Fetches the campaign and its resolved recipients (deduped across
         target lists, no subscription-status filter applied). Returns a
-        :class:`SendSummary` — pure data, no printing or prompting.
+        :class:`SendManifest` — pure data, no printing or prompting. Call
+        ``manifest.format()`` for a printable snapshot.
         """
         campaign = self.get_campaign(campaign_id)
         target_lists: list[tuple[int, str]] = [
@@ -225,7 +268,7 @@ class ListmonkClient:
         ]
         list_ids = [lid for lid, _ in target_lists]
         recipients = self.list_subscribers(list_ids) if list_ids else []
-        return SendSummary(
+        return SendManifest(
             campaign_id=campaign_id,
             name=campaign.get("name", ""),
             subject=campaign.get("subject", ""),
@@ -388,37 +431,10 @@ def _extract_list_ids(campaign: dict[str, Any]) -> list[int]:
 _CONFIRM_SAMPLE_LIMIT = 5
 
 
-def _format_summary_for_confirmation(summary: SendSummary) -> str:
-    lines = [
-        f"Send Summary — Campaign {summary.campaign_id}",
-        f"  Name:    {summary.name!r}",
-        f"  Subject: {summary.subject!r}",
-        f"  Status:  {summary.status!r}",
-    ]
-    if summary.from_email:
-        lines.append(f"  From:    {summary.from_email!r}")
-    lines.append("  Target Lists:")
-    for lid, lname in summary.target_lists:
-        lines.append(f"    - [{lid}] {lname}")
-    lines.append(f"  Recipients: {len(summary.recipients)}")
-    for r in summary.recipients[:_CONFIRM_SAMPLE_LIMIT]:
-        lines.append(
-            f"    - {r.email}  subscriber_status={r.status!r}  name={r.name!r}"
-        )
-    remaining = len(summary.recipients) - _CONFIRM_SAMPLE_LIMIT
-    if remaining > 0:
-        lines.append(f"    ... and {remaining} more (not shown)")
-
-    if summary.status != "draft":
-        lines.append("")
-        lines.append(
-            f"  WARNING: status is {summary.status!r}, not 'draft'. "
-            f"Proceed only if intentional."
-        )
-
-    lines.append("")
-    lines.append("About to trigger Listmonk to send this campaign.")
-    lines.append("This action cannot be undone.")
-    lines.append("")
-    lines.append("Type the campaign name EXACTLY to confirm (anything else aborts): ")
-    return "\n".join(lines)
+def _format_send_confirmation_prompt(manifest: SendManifest) -> str:
+    return (
+        manifest.format()
+        + "\n\nAbout to trigger Listmonk to send this campaign."
+        + "\nThis action cannot be undone."
+        + "\n\nType the campaign name EXACTLY to confirm (anything else aborts): "
+    )

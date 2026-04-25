@@ -8,7 +8,7 @@ import requests
 from ocha_relay.listmonk import (
     ListmonkClient,
     SendAborted,
-    SendSummary,
+    SendManifest,
     Subscriber,
 )
 
@@ -348,9 +348,7 @@ def test_send_campaign_skip_confirmation_puts_running_to_status_endpoint(
     result = _client().send_campaign(42, skip_confirmation=True)
 
     assert result is None
-    assert captured["url"] == (
-        "https://listmonk.example.org/api/campaigns/42/status"
-    )
+    assert captured["url"] == ("https://listmonk.example.org/api/campaigns/42/status")
     # Exact payload is the critical assertion — this is the single API
     # call that tells Listmonk to start sending.
     assert captured["json"] == {"status": "running"}
@@ -373,7 +371,7 @@ def test_send_campaign_raises_on_http_error(
         _client().send_campaign(42, skip_confirmation=True)
 
 
-# ---------- build_send_summary + confirmation flow ----------
+# ---------- build_send_manifest + confirmation flow ----------
 
 
 def _fake_campaign(
@@ -396,15 +394,13 @@ def _fake_campaign(
     }
 
 
-def test_build_send_summary_assembles_campaign_and_recipients(
+def test_build_send_manifest_assembles_campaign_and_recipients(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
         if url.endswith("/campaigns/42"):
             return _FakeResponse(
-                _fake_campaign(
-                    lists=[{"id": 1, "name": "L1"}, {"id": 2, "name": "L2"}]
-                )
+                _fake_campaign(lists=[{"id": 1, "name": "L1"}, {"id": 2, "name": "L2"}])
             )
         if url.endswith("/subscribers"):
             return _FakeResponse(_page([_sub(9, "a@x.org")], 1, 1, 100))
@@ -412,16 +408,69 @@ def test_build_send_summary_assembles_campaign_and_recipients(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    summary = _client().build_send_summary(42)
+    manifest = _client().build_send_manifest(42)
 
-    assert isinstance(summary, SendSummary)
-    assert summary.campaign_id == 42
-    assert summary.name == "Weekly Update"
-    assert summary.subject == "Subj"
-    assert summary.status == "draft"
-    assert summary.from_email == "from@x.org"
-    assert summary.target_lists == [(1, "L1"), (2, "L2")]
-    assert [r.email for r in summary.recipients] == ["a@x.org"]
+    assert isinstance(manifest, SendManifest)
+    assert manifest.campaign_id == 42
+    assert manifest.name == "Weekly Update"
+    assert manifest.subject == "Subj"
+    assert manifest.status == "draft"
+    assert manifest.from_email == "from@x.org"
+    assert manifest.target_lists == [(1, "L1"), (2, "L2")]
+    assert [r.email for r in manifest.recipients] == ["a@x.org"]
+
+
+def _manifest(
+    *,
+    status: str = "draft",
+    recipients: list[Subscriber] | None = None,
+) -> SendManifest:
+    return SendManifest(
+        campaign_id=42,
+        name="Weekly Update",
+        subject="Subj",
+        status=status,
+        from_email="from@x.org",
+        target_lists=[(1, "L1"), (2, "L2")],
+        recipients=recipients
+        if recipients is not None
+        else [Subscriber.from_api(_sub(9, "a@x.org"))],
+        raw_campaign={},
+    )
+
+
+def test_send_manifest_format_renders_snapshot_without_prompt_tail() -> None:
+    """`format()` is the inspect-friendly half — no confirmation prompt.
+
+    This is the use case from issue #2: callers wanting to print the
+    manifest before deciding to send must NOT receive the 'Type the
+    campaign name' tail (that belongs to send_campaign's confirmation
+    flow only).
+    """
+    text = _manifest().format()
+
+    # Snapshot fields are present.
+    assert "Send Manifest — Campaign 42" in text
+    assert "'Weekly Update'" in text
+    assert "'Subj'" in text
+    assert "'draft'" in text
+    assert "[1] L1" in text
+    assert "[2] L2" in text
+    assert "Recipients: 1" in text
+    assert "a@x.org" in text
+
+    # Confirmation-prompt tail must NOT leak into the inspect output.
+    assert "Type the campaign name" not in text
+    assert "About to trigger" not in text
+
+
+def test_send_manifest_format_includes_warning_when_status_not_draft() -> None:
+    """The non-draft warning belongs in the snapshot — useful for both
+    inspect and confirmation contexts (you want to see it either way)."""
+    text = _manifest(status="running").format()
+
+    assert "WARNING" in text
+    assert "'running'" in text
 
 
 def test_send_campaign_prompts_and_sends_when_name_matches(
@@ -453,9 +502,9 @@ def test_send_campaign_prompts_and_sends_when_name_matches(
     _client().send_campaign(42, ask=ask)
 
     assert put_fired["json"] == {"status": "running"}
-    # Summary text should have been passed to ask, not just a short prompt.
+    # Manifest text should have been passed to ask, not just a short prompt.
     assert "Weekly Update" in received_prompt["text"]
-    assert "Send Summary" in received_prompt["text"]
+    assert "Send Manifest" in received_prompt["text"]
 
 
 def test_send_campaign_raises_when_typed_name_does_not_match(
@@ -537,9 +586,7 @@ def test_get_rendered_html_returns_response_text(
     html = _client().get_rendered_html(42)
 
     assert html == "<html><body>rendered</body></html>"
-    assert captured["url"] == (
-        "https://listmonk.example.org/api/campaigns/42/preview"
-    )
+    assert captured["url"] == ("https://listmonk.example.org/api/campaigns/42/preview")
     assert captured["auth"] == ("u", "p")
 
 

@@ -20,7 +20,7 @@ Until this package is published on PyPI, install directly from Git in any uv-man
 
 ```bash
 # Pin to a release tag (recommended — immutable ref):
-uv add "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@v0.1.0"
+uv add "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@v0.2.0"
 
 # Pin to main (moves with the default branch):
 uv add "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@main"
@@ -35,7 +35,7 @@ This lands in the consumer's `pyproject.toml` as:
 dependencies = ["ocha-relay"]
 
 [tool.uv.sources]
-ocha-relay = { git = "https://github.com/OCHA-DAP/ocha-relay.git", rev = "v0.1.0" }
+ocha-relay = { git = "https://github.com/OCHA-DAP/ocha-relay.git", rev = "v0.2.0" }
 ```
 
 (Older uv versions inlined the Git URL directly into `dependencies` using the `"ocha-relay @ git+https://..."` form. Either shape installs the same package; current uv writes the `[tool.uv.sources]` layout above.)

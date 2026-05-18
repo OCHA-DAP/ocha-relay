@@ -173,6 +173,7 @@ class ListmonkClient:
         list_ids: list[int] | None = None,
         template_id: int = DEFAULT_CAMPAIGN_TEMPLATE_ID,
         content_type: str = "html",
+        media_ids: list[int] | None = None,
     ) -> int:
         """Create a campaign in draft state. Returns the new campaign ID.
 
@@ -184,6 +185,10 @@ class ListmonkClient:
         are pointing this client at a different Listmonk, pass the
         ``template_id`` of that instance's campaign template — using ``8``
         blindly will either 400 or wrap your body in the wrong template.
+
+        ``media_ids`` is a list of Listmonk media IDs to attach to the
+        campaign email. Upload files first with :meth:`upload_attachment`
+        to obtain their IDs.
         """
         payload: dict[str, Any] = {
             "name": name,
@@ -193,6 +198,7 @@ class ListmonkClient:
             "type": "regular",
             "content_type": content_type,
             "body": body,
+            "media": media_ids or [],
         }
         r = requests.post(
             f"{self.base_url}/campaigns",
@@ -233,6 +239,33 @@ class ListmonkClient:
         r.raise_for_status()
         url: str = r.json()["data"]["url"]
         return url
+
+    def upload_attachment(self, data: bytes, filename: str) -> int:
+        """Upload a file to Listmonk and return its media ID for use as an attachment.
+
+        Unlike :meth:`upload_media` (which returns a URL for inline ``<img>``
+        tags), this returns the integer media ID needed in the ``media_ids``
+        list of :meth:`create_campaign` to attach the file to the email.
+
+        Example::
+
+            mid = client.upload_attachment(csv_bytes, "exposure.csv")
+            cid = client.create_campaign(..., media_ids=[mid])
+        """
+        import mimetypes
+
+        mime_type, _ = mimetypes.guess_type(filename)
+        if mime_type is None:
+            mime_type = "application/octet-stream"
+        r = requests.post(
+            f"{self.base_url}/media",
+            auth=self._auth,
+            files={"file": (filename, data, mime_type)},
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        media_id: int = r.json()["data"]["id"]
+        return media_id
 
     def send_campaign(
         self,

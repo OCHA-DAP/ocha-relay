@@ -204,6 +204,36 @@ class ListmonkClient:
         campaign_id: int = r.json()["data"]["id"]
         return campaign_id
 
+    def upload_media(self, data: bytes, filename: str = "image.png") -> str:
+        """Upload a file to the Listmonk media library. Returns the hosted URL.
+
+        ``data`` is the raw file bytes. ``filename`` sets the filename sent to
+        Listmonk; the extension determines the MIME type (png, jpg, gif, pdf
+        are all accepted by Listmonk). Use the returned URL in campaign HTML
+        ``<img src="...">`` tags so images are hosted rather than inlined as
+        data URIs — inline base64 inflates the email body and causes Gmail to
+        clip messages over ~102 KB.
+
+        Example::
+
+            url = client.upload_media(png_bytes, "chart.png")
+            html = f'<img src="{url}">'
+        """
+        import mimetypes
+
+        mime_type, _ = mimetypes.guess_type(filename)
+        if mime_type is None:
+            mime_type = "application/octet-stream"
+        r = requests.post(
+            f"{self.base_url}/media",
+            auth=self._auth,
+            files={"file": (filename, data, mime_type)},
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        url: str = r.json()["data"]["url"]
+        return url
+
     def send_campaign(
         self,
         campaign_id: int,

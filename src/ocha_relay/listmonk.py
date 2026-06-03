@@ -440,6 +440,52 @@ class ListmonkClient:
             page += 1
         return subscribers
 
+    def create_list(
+        self,
+        *,
+        name: str,
+        list_type: str = "public",
+        optin: str = "single",
+        tags: list[str] | None = None,
+    ) -> int:
+        """Create a list. Returns the new list ID."""
+        payload: dict[str, Any] = {
+            "name": name,
+            "type": list_type,
+            "optin": optin,
+            "tags": tags or [],
+        }
+        r = requests.post(
+            f"{self.base_url}/lists",
+            auth=self._auth,
+            json=payload,
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        return int(r.json()["data"]["id"])
+
+    def fetch_all_lists(self, *, tag: str | None = None) -> list[dict[str, Any]]:
+        """Fetch all lists (paginated). Optionally filter by tag."""
+        params: list[tuple[str, Any]] = [("per_page", 100)]
+        if tag:
+            params.append(("tag", tag))
+        results: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            r = requests.get(
+                f"{self.base_url}/lists",
+                auth=self._auth,
+                params=[*params, ("page", page)],
+                timeout=self.timeout,
+            )
+            r.raise_for_status()
+            data = r.json()["data"]
+            results.extend(data["results"])
+            if page * data["per_page"] >= data["total"]:
+                break
+            page += 1
+        return results
+
     def campaign_recipients(
         self,
         campaign_id: int,

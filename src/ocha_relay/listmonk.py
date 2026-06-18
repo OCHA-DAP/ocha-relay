@@ -5,6 +5,7 @@ Listmonk API reference: https://listmonk.app/docs/apis/apis/
 
 from __future__ import annotations
 
+import mimetypes
 import os
 import tempfile
 import webbrowser
@@ -225,19 +226,7 @@ class ListmonkClient:
             url = client.upload_media(png_bytes, "chart.png")
             html = f'<img src="{url}">'
         """
-        import mimetypes
-
-        mime_type, _ = mimetypes.guess_type(filename)
-        if mime_type is None:
-            mime_type = "application/octet-stream"
-        r = requests.post(
-            f"{self.base_url}/media",
-            auth=self._auth,
-            files={"file": (filename, data, mime_type)},
-            timeout=self.timeout,
-        )
-        r.raise_for_status()
-        url: str = r.json()["data"]["url"]
+        url: str = self._upload_to_media(data, filename)["url"]
         return url
 
     def upload_attachment(self, data: bytes, filename: str) -> int:
@@ -252,11 +241,18 @@ class ListmonkClient:
             mid = client.upload_attachment(csv_bytes, "exposure.csv")
             cid = client.create_campaign(..., media_ids=[mid])
         """
-        import mimetypes
+        media_id: int = self._upload_to_media(data, filename)["id"]
+        return media_id
 
-        mime_type, _ = mimetypes.guess_type(filename)
-        if mime_type is None:
-            mime_type = "application/octet-stream"
+    def _upload_to_media(self, data: bytes, filename: str) -> dict[str, Any]:
+        """POST a file to ``/media`` and return the ``data`` dict.
+
+        Shared by :meth:`upload_media` and :meth:`upload_attachment`, which
+        differ only in which field of the response they read (``url`` vs
+        ``id``). The MIME type is guessed from ``filename``, falling back to
+        ``application/octet-stream`` for unknown extensions.
+        """
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         r = requests.post(
             f"{self.base_url}/media",
             auth=self._auth,
@@ -264,8 +260,8 @@ class ListmonkClient:
             timeout=self.timeout,
         )
         r.raise_for_status()
-        media_id: int = r.json()["data"]["id"]
-        return media_id
+        data_dict: dict[str, Any] = r.json()["data"]
+        return data_dict
 
     def send_campaign(
         self,
@@ -448,7 +444,15 @@ class ListmonkClient:
         optin: str = "single",
         tags: list[str] | None = None,
     ) -> int:
-        """Create a list. Returns the new list ID."""
+        """Create a list. Returns the new list ID.
+
+        ``list_type`` is the list's visibility: ``"public"`` (the default;
+        appears on the public subscription page) or ``"private"``.
+
+        ``optin`` is the confirmation mode: ``"single"`` (the default;
+        subscribers are added directly) or ``"double"`` (subscribers must
+        click a confirmation link before they count as ``confirmed``).
+        """
         payload: dict[str, Any] = {
             "name": name,
             "type": list_type,
@@ -481,6 +485,11 @@ class ListmonkClient:
             r.raise_for_status()
             data = r.json()["data"]
             results.extend(data["results"])
+            # Defensive: a malformed per_page=0 response would wedge the
+            # pagination check (0 * anything is never >= total). Bail
+            # rather than loop forever. Mirrors list_subscribers.
+            if data["per_page"] == 0:
+                break
             if page * data["per_page"] >= data["total"]:
                 break
             page += 1

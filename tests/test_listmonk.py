@@ -632,3 +632,254 @@ def test_preview_in_browser_writes_html_and_opens_default_browser(
     # Test-side cleanup — library deliberately leaves the temp file so
     # the browser has time to load it.
     path.unlink()
+
+
+# ---------- create_campaign media payload ----------
+
+
+def test_create_campaign_emits_media_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["json"] = kwargs["json"]
+        return _FakeResponse({"data": {"id": 1}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    _client().create_campaign(name="n", subject="s", body="b", media_ids=[7, 8])
+
+    assert captured["json"]["media"] == [7, 8]
+
+
+def test_create_campaign_defaults_empty_media_when_none_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["json"] = kwargs["json"]
+        return _FakeResponse({"data": {"id": 1}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    _client().create_campaign(name="n", subject="s", body="b")
+
+    assert captured["json"]["media"] == []
+
+
+# ---------- upload_media / upload_attachment ----------
+
+
+def test_upload_media_posts_multipart_and_returns_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["url"] = url
+        captured["auth"] = kwargs["auth"]
+        captured["files"] = kwargs["files"]
+        return _FakeResponse({"data": {"id": 12, "url": "https://cdn.x/chart.png"}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    url = _client().upload_media(b"\x89PNG...", "chart.png")
+
+    assert url == "https://cdn.x/chart.png"
+    assert captured["url"] == "https://listmonk.example.org/api/media"
+    assert captured["auth"] == ("u", "p")
+    # Multipart payload: ("file", (filename, data, mime_type)).
+    filename, data, mime_type = captured["files"]["file"]
+    assert filename == "chart.png"
+    assert data == b"\x89PNG..."
+    assert mime_type == "image/png"
+
+
+def test_upload_media_defaults_filename_to_image_png(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["files"] = kwargs["files"]
+        return _FakeResponse({"data": {"id": 1, "url": "https://cdn.x/image.png"}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    _client().upload_media(b"data")
+
+    filename, _data, mime_type = captured["files"]["file"]
+    assert filename == "image.png"
+    assert mime_type == "image/png"
+
+
+def test_upload_media_falls_back_to_octet_stream_for_unknown_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["files"] = kwargs["files"]
+        return _FakeResponse({"data": {"id": 1, "url": "https://cdn.x/f"}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    _client().upload_media(b"data", "mystery.unknownext")
+
+    _filename, _data, mime_type = captured["files"]["file"]
+    assert mime_type == "application/octet-stream"
+
+
+def test_upload_attachment_returns_media_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["url"] = url
+        captured["files"] = kwargs["files"]
+        return _FakeResponse({"data": {"id": 55, "url": "https://cdn.x/exposure.csv"}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    media_id = _client().upload_attachment(b"a,b,c", "exposure.csv")
+
+    assert media_id == 55
+    assert captured["url"] == "https://listmonk.example.org/api/media"
+    filename, data, mime_type = captured["files"]["file"]
+    assert filename == "exposure.csv"
+    assert data == b"a,b,c"
+    assert mime_type == "text/csv"
+
+
+def test_upload_attachment_raises_on_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse({"data": {}}, status_code=500)
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    with pytest.raises(requests.HTTPError):
+        _client().upload_attachment(b"data", "f.csv")
+
+
+# ---------- create_list ----------
+
+
+def test_create_list_posts_payload_and_returns_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["url"] = url
+        captured["json"] = kwargs["json"]
+        captured["auth"] = kwargs["auth"]
+        return _FakeResponse({"data": {"id": 21}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    result = _client().create_list(name="DS alerts", tags=["ds", "alerts"])
+
+    assert result == 21
+    assert captured["url"] == "https://listmonk.example.org/api/lists"
+    assert captured["auth"] == ("u", "p")
+    payload = captured["json"]
+    assert payload["name"] == "DS alerts"
+    assert payload["type"] == "public"  # default
+    assert payload["optin"] == "single"  # default
+    assert payload["tags"] == ["ds", "alerts"]
+
+
+def test_create_list_defaults_empty_tags(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["json"] = kwargs["json"]
+        return _FakeResponse({"data": {"id": 1}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    _client().create_list(name="n")
+
+    assert captured["json"]["tags"] == []
+
+
+# ---------- fetch_all_lists ----------
+
+
+def _lists_page(
+    results: list[dict[str, Any]], total: int, page: int, per_page: int
+) -> dict[str, Any]:
+    return {
+        "data": {"results": results, "total": total, "page": page, "per_page": per_page}
+    }
+
+
+def test_fetch_all_lists_single_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["url"] = url
+        captured["params"] = kwargs["params"]
+        rows = [{"id": 1, "name": "L1"}, {"id": 2, "name": "L2"}]
+        return _FakeResponse(_lists_page(rows, total=2, page=1, per_page=100))
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    result = _client().fetch_all_lists()
+
+    assert [lst["id"] for lst in result] == [1, 2]
+    assert captured["url"] == "https://listmonk.example.org/api/lists"
+    assert ("per_page", 100) in captured["params"]
+
+
+def test_fetch_all_lists_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        page = dict(kwargs["params"])["page"]
+        if page == 1:
+            return _FakeResponse(
+                _lists_page([{"id": 1}, {"id": 2}], total=3, page=1, per_page=2)
+            )
+        return _FakeResponse(_lists_page([{"id": 3}], total=3, page=2, per_page=2))
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    result = _client().fetch_all_lists()
+
+    assert [lst["id"] for lst in result] == [1, 2, 3]
+
+
+def test_fetch_all_lists_forwards_tag_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        captured["params"] = kwargs["params"]
+        return _FakeResponse(_lists_page([], total=0, page=1, per_page=100))
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    _client().fetch_all_lists(tag="alerts")
+
+    assert ("tag", "alerts") in captured["params"]
+
+
+def test_fetch_all_lists_bails_on_malformed_per_page_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A per_page=0 response must not wedge the pagination loop forever."""
+    calls: list[int] = []
+
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(dict(kwargs["params"])["page"])
+        return _FakeResponse(_lists_page([{"id": 1}], total=5, page=1, per_page=0))
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    result = _client().fetch_all_lists()
+
+    assert [lst["id"] for lst in result] == [1]
+    assert calls == [1]  # bailed after the first page instead of looping

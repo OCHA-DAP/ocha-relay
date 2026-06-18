@@ -5,6 +5,7 @@ Listmonk API reference: https://listmonk.app/docs/apis/apis/
 
 from __future__ import annotations
 
+import mimetypes
 import os
 import tempfile
 import webbrowser
@@ -173,6 +174,7 @@ class ListmonkClient:
         list_ids: list[int] | None = None,
         template_id: int = DEFAULT_CAMPAIGN_TEMPLATE_ID,
         content_type: str = "html",
+        media_ids: list[int] | None = None,
     ) -> int:
         """Create a campaign in draft state. Returns the new campaign ID.
 
@@ -184,6 +186,10 @@ class ListmonkClient:
         are pointing this client at a different Listmonk, pass the
         ``template_id`` of that instance's campaign template — using ``8``
         blindly will either 400 or wrap your body in the wrong template.
+
+        ``media_ids`` is a list of Listmonk media IDs to attach to the
+        campaign email. Upload files first with :meth:`upload_attachment`
+        to obtain their IDs.
         """
         payload: dict[str, Any] = {
             "name": name,
@@ -193,6 +199,7 @@ class ListmonkClient:
             "type": "regular",
             "content_type": content_type,
             "body": body,
+            "media": media_ids or [],
         }
         r = requests.post(
             f"{self.base_url}/campaigns",
@@ -203,6 +210,58 @@ class ListmonkClient:
         r.raise_for_status()
         campaign_id: int = r.json()["data"]["id"]
         return campaign_id
+
+    def upload_media(self, data: bytes, filename: str = "image.png") -> str:
+        """Upload a file to the Listmonk media library. Returns the hosted URL.
+
+        ``data`` is the raw file bytes. ``filename`` sets the filename sent to
+        Listmonk; the extension determines the MIME type (png, jpg, gif, pdf
+        are all accepted by Listmonk). Use the returned URL in campaign HTML
+        ``<img src="...">`` tags so images are hosted rather than inlined as
+        data URIs — inline base64 inflates the email body and causes Gmail to
+        clip messages over ~102 KB.
+
+        Example::
+
+            url = client.upload_media(png_bytes, "chart.png")
+            html = f'<img src="{url}">'
+        """
+        url: str = self._upload_to_media(data, filename)["url"]
+        return url
+
+    def upload_attachment(self, data: bytes, filename: str) -> int:
+        """Upload a file to Listmonk and return its media ID for use as an attachment.
+
+        Unlike :meth:`upload_media` (which returns a URL for inline ``<img>``
+        tags), this returns the integer media ID needed in the ``media_ids``
+        list of :meth:`create_campaign` to attach the file to the email.
+
+        Example::
+
+            mid = client.upload_attachment(csv_bytes, "exposure.csv")
+            cid = client.create_campaign(..., media_ids=[mid])
+        """
+        media_id: int = self._upload_to_media(data, filename)["id"]
+        return media_id
+
+    def _upload_to_media(self, data: bytes, filename: str) -> dict[str, Any]:
+        """POST a file to ``/media`` and return the ``data`` dict.
+
+        Shared by :meth:`upload_media` and :meth:`upload_attachment`, which
+        differ only in which field of the response they read (``url`` vs
+        ``id``). The MIME type is guessed from ``filename``, falling back to
+        ``application/octet-stream`` for unknown extensions.
+        """
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        r = requests.post(
+            f"{self.base_url}/media",
+            auth=self._auth,
+            files={"file": (filename, data, mime_type)},
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        data_dict: dict[str, Any] = r.json()["data"]
+        return data_dict
 
     def send_campaign(
         self,
@@ -376,6 +435,65 @@ class ListmonkClient:
                 break
             page += 1
         return subscribers
+
+    def create_list(
+        self,
+        *,
+        name: str,
+        list_type: str = "public",
+        optin: str = "single",
+        tags: list[str] | None = None,
+    ) -> int:
+        """Create a list. Returns the new list ID.
+
+        ``list_type`` is the list's visibility: ``"public"`` (the default;
+        appears on the public subscription page) or ``"private"``.
+
+        ``optin`` is the confirmation mode: ``"single"`` (the default;
+        subscribers are added directly) or ``"double"`` (subscribers must
+        click a confirmation link before they count as ``confirmed``).
+        """
+        payload: dict[str, Any] = {
+            "name": name,
+            "type": list_type,
+            "optin": optin,
+            "tags": tags or [],
+        }
+        r = requests.post(
+            f"{self.base_url}/lists",
+            auth=self._auth,
+            json=payload,
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        return int(r.json()["data"]["id"])
+
+    def fetch_all_lists(self, *, tag: str | None = None) -> list[dict[str, Any]]:
+        """Fetch all lists (paginated). Optionally filter by tag."""
+        params: list[tuple[str, Any]] = [("per_page", 100)]
+        if tag:
+            params.append(("tag", tag))
+        results: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            r = requests.get(
+                f"{self.base_url}/lists",
+                auth=self._auth,
+                params=[*params, ("page", page)],
+                timeout=self.timeout,
+            )
+            r.raise_for_status()
+            data = r.json()["data"]
+            results.extend(data["results"])
+            # Defensive: a malformed per_page=0 response would wedge the
+            # pagination check (0 * anything is never >= total). Bail
+            # rather than loop forever. Mirrors list_subscribers.
+            if data["per_page"] == 0:
+                break
+            if page * data["per_page"] >= data["total"]:
+                break
+            page += 1
+        return results
 
     def campaign_recipients(
         self,

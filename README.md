@@ -104,9 +104,13 @@ client.send_campaign(cid)
 - `campaign_recipients(campaign_id, subscription_status=None) -> list[Subscriber]` — convenience: reads the campaign's target lists and resolves their subscribers. Pass `subscription_status="confirmed"` (or other valid value) to filter; `None` means "everyone on the lists."
 - `get_rendered_html(campaign_id) -> str` — Listmonk's server-rendered HTML (template applied) — what a recipient sees in their inbox
 - `build_send_manifest(campaign_id) -> SendManifest` — structured pre-send snapshot (name, subject, status, target lists, recipients) for custom review/display. Call `manifest.format()` for a printable multi-line string.
+- `fetch_all_lists(*, tag=None) -> list[dict]` — all lists (paginated), optionally filtered by `tag`. Returns raw Listmonk list records.
 
 **Write / action**
-- `create_campaign(*, name, subject, body, list_ids=None, template_id=8, content_type="html") -> int` — POSTs a new draft, returns new campaign id. `template_id=8` is the OCHA Listmonk's canonical campaign template; override if you're pointing at a different Listmonk instance.
+- `create_campaign(*, name, subject, body, list_ids=None, template_id=8, content_type="html", media_ids=None) -> int` — POSTs a new draft, returns new campaign id. `template_id=8` is the OCHA Listmonk's canonical campaign template; override if you're pointing at a different Listmonk instance. `media_ids` attaches uploaded media (from `upload_attachment`) to the email.
+- `create_list(*, name, list_type="public", optin="single", tags=None) -> int` — creates a list, returns new list id. `list_type` is `"public"`/`"private"`; `optin` is `"single"`/`"double"`.
+- `upload_media(data, filename="image.png") -> str` — uploads bytes to the media library, returns the hosted URL for use in inline `<img src="...">` tags (hosting avoids the base64 bloat that makes Gmail clip emails over ~102 KB). MIME type is guessed from `filename`.
+- `upload_attachment(data, filename) -> int` — uploads bytes and returns the integer media id for the `media_ids` arg of `create_campaign` (attaches the file rather than inlining it).
 - `send_campaign(campaign_id, *, skip_confirmation=False, ask=input) -> None` — transitions campaign to `running` (the actual email-triggering call). Default prompts for confirmation; refuses status `"finished"` in both modes (re-sending would duplicate emails).
 - `preview_in_browser(campaign_id) -> Path` — fetches rendered HTML, writes to a temp file, calls `webbrowser.open` on it
 

@@ -752,16 +752,82 @@ def test_upload_attachment_returns_media_id(
     assert mime_type == "text/csv"
 
 
-def test_upload_attachment_raises_on_http_error(
+def test_upload_attachment_raises_on_http_error_without_retrying(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    calls: list[str] = []
+
     def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(url)
         return _FakeResponse({"data": {}}, status_code=500)
 
     monkeypatch.setattr(requests, "post", fake_post)
 
     with pytest.raises(requests.HTTPError):
         _client().upload_attachment(b"data", "f.csv")
+
+    # Error *responses* are not retried — only timeouts/connection errors.
+    assert len(calls) == 1
+
+
+def test_upload_media_retries_on_timeout_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(url)
+        if len(calls) < 3:
+            raise requests.ReadTimeout("read timed out")
+        return _FakeResponse({"data": {"id": 7, "url": "https://cdn.x/chart.png"}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr("ocha_relay.listmonk.time.sleep", sleeps.append)
+
+    url = _client().upload_media(b"\x89PNG...", "chart.png")
+
+    assert url == "https://cdn.x/chart.png"
+    assert len(calls) == 3
+    assert sleeps == [5.0, 10.0]  # linear backoff between attempts
+
+
+def test_upload_media_retries_on_connection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(url)
+        if len(calls) == 1:
+            raise requests.ConnectionError("connection reset")
+        return _FakeResponse({"data": {"id": 7, "url": "https://cdn.x/chart.png"}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr("ocha_relay.listmonk.time.sleep", lambda _s: None)
+
+    assert _client().upload_media(b"data", "chart.png") == "https://cdn.x/chart.png"
+    assert len(calls) == 2
+
+
+def test_upload_media_raises_after_exhausting_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(url)
+        raise requests.ReadTimeout("read timed out")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr("ocha_relay.listmonk.time.sleep", sleeps.append)
+
+    with pytest.raises(requests.ReadTimeout):
+        _client().upload_media(b"data", "chart.png")
+
+    assert len(calls) == 3
+    assert len(sleeps) == 2  # no sleep after the final attempt
 
 
 # ---------- create_list ----------

@@ -8,6 +8,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import tempfile
+import time
 import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ import requests
 
 DEFAULT_CAMPAIGN_TEMPLATE_ID = 8
 _SUBSCRIBERS_PAGE_SIZE = 100
+_UPLOAD_ATTEMPTS = 3
+_UPLOAD_BACKOFF_SECONDS = 5.0
 
 
 class SendAborted(Exception):
@@ -143,7 +146,10 @@ class ListmonkClient:
     base_url: str
     username: str
     password: str
-    timeout: float = 30.0
+    # 60s rather than a typical 30: on Azure App Service deployments with the
+    # media library on an Azure Files mount, slow upload responses are a
+    # normal operating condition, not a sign the instance is down.
+    timeout: float = 60.0
 
     @classmethod
     def from_env(cls) -> Self:
@@ -251,17 +257,33 @@ class ListmonkClient:
         differ only in which field of the response they read (``url`` vs
         ``id``). The MIME type is guessed from ``filename``, falling back to
         ``application/octet-stream`` for unknown extensions.
+
+        Timeouts and connection errors are retried (up to ``_UPLOAD_ATTEMPTS``
+        attempts, linear backoff): media uploads are safe to repeat — the
+        worst case is an attempt that succeeded server-side after we gave up
+        on it, leaving an orphaned file in the media library. HTTP error
+        responses are NOT retried; nor are campaign create/send anywhere in
+        this client, where a repeat could duplicate emails to recipients.
         """
         mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        r = requests.post(
-            f"{self.base_url}/media",
-            auth=self._auth,
-            files={"file": (filename, data, mime_type)},
-            timeout=self.timeout,
-        )
-        r.raise_for_status()
-        data_dict: dict[str, Any] = r.json()["data"]
-        return data_dict
+        attempt = 1
+        while True:
+            try:
+                r = requests.post(
+                    f"{self.base_url}/media",
+                    auth=self._auth,
+                    files={"file": (filename, data, mime_type)},
+                    timeout=self.timeout,
+                )
+            except (requests.Timeout, requests.ConnectionError):
+                if attempt >= _UPLOAD_ATTEMPTS:
+                    raise
+                time.sleep(_UPLOAD_BACKOFF_SECONDS * attempt)
+                attempt += 1
+                continue
+            r.raise_for_status()
+            data_dict: dict[str, Any] = r.json()["data"]
+            return data_dict
 
     def send_campaign(
         self,

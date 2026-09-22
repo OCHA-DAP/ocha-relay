@@ -19,8 +19,11 @@ import requests
 
 DEFAULT_CAMPAIGN_TEMPLATE_ID = 8
 _SUBSCRIBERS_PAGE_SIZE = 100
-_UPLOAD_ATTEMPTS = 3
-_UPLOAD_BACKOFF_SECONDS = 5.0
+# Retry policy for calls that are safe to repeat (reads, media uploads).
+# Never applied to campaign create/send or list create — a repeat there
+# could duplicate emails or lists.
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF_SECONDS = 5.0
 
 
 class SendAborted(Exception):
@@ -171,6 +174,29 @@ class ListmonkClient:
     def _auth(self) -> tuple[str, str]:
         return (self.username, self.password)
 
+    def _request_with_retry(
+        self, method: Callable[..., requests.Response], url: str, **kwargs: Any
+    ) -> requests.Response:
+        """Issue ``method(url, **kwargs)``, retrying timeouts and connection errors.
+
+        Up to ``_RETRY_ATTEMPTS`` attempts with linear backoff. Only for calls
+        that are safe to repeat: every GET, and media uploads (worst case an
+        orphaned file). HTTP error *responses* are never retried — the caller
+        still does ``raise_for_status``. On Azure App Service a cold or busy
+        Listmonk can sit on a request past the timeout and then answer the
+        next one in well under a second, which is exactly the shape a retry
+        absorbs (storm alert 2026-09-22 03:50 UTC died on one such GET).
+        """
+        attempt = 1
+        while True:
+            try:
+                return method(url, auth=self._auth, timeout=self.timeout, **kwargs)
+            except (requests.Timeout, requests.ConnectionError):
+                if attempt >= _RETRY_ATTEMPTS:
+                    raise
+                time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
+                attempt += 1
+
     def create_campaign(
         self,
         *,
@@ -258,32 +284,22 @@ class ListmonkClient:
         ``id``). The MIME type is guessed from ``filename``, falling back to
         ``application/octet-stream`` for unknown extensions.
 
-        Timeouts and connection errors are retried (up to ``_UPLOAD_ATTEMPTS``
-        attempts, linear backoff): media uploads are safe to repeat — the
+        Timeouts and connection errors are retried via
+        :meth:`_request_with_retry`: media uploads are safe to repeat — the
         worst case is an attempt that succeeded server-side after we gave up
         on it, leaving an orphaned file in the media library. HTTP error
         responses are NOT retried; nor are campaign create/send anywhere in
         this client, where a repeat could duplicate emails to recipients.
         """
         mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        attempt = 1
-        while True:
-            try:
-                r = requests.post(
-                    f"{self.base_url}/media",
-                    auth=self._auth,
-                    files={"file": (filename, data, mime_type)},
-                    timeout=self.timeout,
-                )
-            except (requests.Timeout, requests.ConnectionError):
-                if attempt >= _UPLOAD_ATTEMPTS:
-                    raise
-                time.sleep(_UPLOAD_BACKOFF_SECONDS * attempt)
-                attempt += 1
-                continue
-            r.raise_for_status()
-            data_dict: dict[str, Any] = r.json()["data"]
-            return data_dict
+        r = self._request_with_retry(
+            requests.post,
+            f"{self.base_url}/media",
+            files={"file": (filename, data, mime_type)},
+        )
+        r.raise_for_status()
+        data_dict: dict[str, Any] = r.json()["data"]
+        return data_dict
 
     def send_campaign(
         self,
@@ -362,10 +378,8 @@ class ListmonkClient:
 
     def get_campaign(self, campaign_id: int) -> dict[str, Any]:
         """Fetch a campaign record. Returns the ``data`` dict from the API."""
-        r = requests.get(
-            f"{self.base_url}/campaigns/{campaign_id}",
-            auth=self._auth,
-            timeout=self.timeout,
+        r = self._request_with_retry(
+            requests.get, f"{self.base_url}/campaigns/{campaign_id}"
         )
         r.raise_for_status()
         data: dict[str, Any] = r.json()["data"]
@@ -381,10 +395,8 @@ class ListmonkClient:
         Different from ``get_campaign(id)["body"]``, which returns the
         raw body you stored — without the template applied.
         """
-        r = requests.get(
-            f"{self.base_url}/campaigns/{campaign_id}/preview",
-            auth=self._auth,
-            timeout=self.timeout,
+        r = self._request_with_retry(
+            requests.get, f"{self.base_url}/campaigns/{campaign_id}/preview"
         )
         r.raise_for_status()
         return r.text
@@ -439,11 +451,10 @@ class ListmonkClient:
         subscribers: list[Subscriber] = []
         page = 1
         while True:
-            r = requests.get(
+            r = self._request_with_retry(
+                requests.get,
                 f"{self.base_url}/subscribers",
-                auth=self._auth,
                 params=[*base_params, ("page", page)],
-                timeout=self.timeout,
             )
             r.raise_for_status()
             data = r.json()["data"]
@@ -498,11 +509,10 @@ class ListmonkClient:
         results: list[dict[str, Any]] = []
         page = 1
         while True:
-            r = requests.get(
+            r = self._request_with_retry(
+                requests.get,
                 f"{self.base_url}/lists",
-                auth=self._auth,
                 params=[*params, ("page", page)],
-                timeout=self.timeout,
             )
             r.raise_for_status()
             data = r.json()["data"]

@@ -949,3 +949,103 @@ def test_fetch_all_lists_bails_on_malformed_per_page_zero(
 
     assert [lst["id"] for lst in result] == [1]
     assert calls == [1]  # bailed after the first page instead of looping
+
+
+# --- read retries -----------------------------------------------------------
+# GETs are safe to repeat, so they get the same retry policy as media uploads.
+# The 2026-09-22 03:50 UTC storm alert died on a single 30s ReadTimeout from
+# GET /lists while Listmonk (Azure App Service) was cold; the next request
+# answered in 0.1s.
+
+
+def test_fetch_all_lists_retries_on_timeout_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(url)
+        if len(calls) == 1:
+            raise requests.ReadTimeout("read timed out")
+        return _FakeResponse(
+            {"data": {"results": [{"id": 79}], "total": 1, "page": 1, "per_page": 100}}
+        )
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr("ocha_relay.listmonk.time.sleep", sleeps.append)
+
+    lists = _client().fetch_all_lists(tag="country")
+
+    assert [row["id"] for row in lists] == [79]
+    assert len(calls) == 2
+    assert sleeps == [5.0]
+
+
+def test_get_campaign_retries_on_connection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(url)
+        if len(calls) < 3:
+            raise requests.ConnectionError("reset by peer")
+        return _FakeResponse({"data": {"id": 42, "status": "draft"}})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr("ocha_relay.listmonk.time.sleep", lambda _s: None)
+
+    assert _client().get_campaign(42)["status"] == "draft"
+    assert len(calls) == 3
+
+
+def test_get_campaign_raises_after_exhausting_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(url)
+        raise requests.ReadTimeout("read timed out")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr("ocha_relay.listmonk.time.sleep", lambda _s: None)
+
+    with pytest.raises(requests.ReadTimeout):
+        _client().get_campaign(42)
+    assert len(calls) == 3
+
+
+def test_get_campaign_does_not_retry_http_error_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_get(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(url)
+        return _FakeResponse({"data": {}}, status_code=503)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    with pytest.raises(requests.HTTPError):
+        _client().get_campaign(42)
+    assert len(calls) == 1  # an error *response* is an answer, not a stall
+
+
+def test_create_campaign_is_never_retried_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeated POST /campaigns could create two campaigns — one send each."""
+    calls: list[str] = []
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(url)
+        raise requests.ReadTimeout("read timed out")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr("ocha_relay.listmonk.time.sleep", lambda _s: None)
+
+    with pytest.raises(requests.ReadTimeout):
+        _client().create_campaign(name="n", subject="s", body="b", list_ids=[1])
+    assert len(calls) == 1
